@@ -1,0 +1,5 @@
+hosts.txt
+*.key
+.env
+*.log
+__pycache__/
