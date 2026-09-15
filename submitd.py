@@ -49,12 +49,18 @@ def status():
 
 LIVE=[None]; pre={"nonce":None,"gp":None,"bal":None}
 subs=[0]; mints=[0]; sent=set(); stats={"sol":0,"bad":0,"stale":0,"tx":0,"ok":0,"fail":0}; lock=threading.Lock()
+VER=[0]; cond=threading.Condition()   # 题目版本号：一变就唤醒所有挂着等题的算力机
+
+def jobkey(L): return (L["prev"],L["target"],L["ablk"]//80)   # 锚点约 8 秒刷新一次
 
 def poller():
     while True:
-        try: LIVE[0]=status()
+        try:
+            s=status(); old=LIVE[0]; LIVE[0]=s
+            if old is None or jobkey(s)!=jobkey(old):
+                with cond: VER[0]+=1; cond.notify_all()
         except Exception as e: log("[RPC]",str(e)[:80])
-        time.sleep(0.5)
+        time.sleep(0.3)
 
 def prefetch():
     while True:
@@ -107,6 +113,7 @@ def submit(nonce,ablk,t_recv,wk):
     return h
 
 class Hd(BaseHTTPRequestHandler):
+    protocol_version="HTTP/1.1"   # 保持连接，算力机每次交解省掉一次建连的往返
     def log_message(self,*a): pass
     def _send(self,code,obj):
         b=json.dumps(obj).encode(); self.send_response(code)
@@ -114,10 +121,14 @@ class Hd(BaseHTTPRequestHandler):
     def do_GET(self):
         u=urlparse(self.path); q=parse_qs(u.query)
         if q.get("t",[""])[0]!=TOKEN: return self._send(403,{"err":"token"})
-        L=LIVE[0]
         if u.path=="/job":
-            tgt=int(TEST_TARGET,16) if TEST_TARGET else L["target"]
-            return self._send(200,{"miner":M,"prev":L["prev"].hex(),"anchor":L["anchor"].hex(),"ablk":L["ablk"],
+            # 长轮询：带 v=上次版本号就挂着等，题目一变立刻返回（最多等 10 秒）
+            v=int(q.get("v",["-1"])[0])
+            with cond:
+                if v==VER[0]: cond.wait_for(lambda: VER[0]!=v, timeout=10)
+                ver=VER[0]
+            L=LIVE[0]; tgt=int(TEST_TARGET,16) if TEST_TARGET else L["target"]
+            return self._send(200,{"v":ver,"miner":M,"prev":L["prev"].hex(),"anchor":L["anchor"].hex(),"ablk":L["ablk"],
                                    "target":f"{tgt:064x}","blk":L["blk"],"stop":bool(MAX_MINTS and mints[0]>=MAX_MINTS)})
         if u.path=="/ping": return self._send(200,{"t":time.time()})
         self._send(404,{})
@@ -149,6 +160,15 @@ class Hd(BaseHTTPRequestHandler):
         self._send(200,res)
 
 log(f"[提交机] 钱包 {M} {'【测试模式，不提交】' if DRY else ''} 端口 {PORT} 上限 {MAX_MINTS or '不限'} 个")
+# 节点体检：连不上/被拒的节点直接踢掉（实测 Robinhood 公共节点对 vast 机房 IP 返回 403）
+good=[]
+for w,u in zip(ws,RPCS):
+    try:
+        t=time.time(); w.eth.call({"to":C,"data":S_STATUS}); good.append(w)
+        log(f"[节点] ✅ {u[:40]} {(time.time()-t)*1000:.0f}ms")
+    except Exception as e: log(f"[节点] ❌ {u[:40]} 不能用，踢掉：{str(e)[:60]}")
+if not good: sys.exit("!! 所有节点都不能用，不开挖")
+ws=good
 LIVE[0]=status(); L=LIVE[0]
 log(f"[链] 块{L['blk']} 已挖 {L['supply']}/{L['maxs']} 第{L['epoch']}期 价格 {L['price']/1e18} ETH 余额 {ws[0].eth.get_balance(M)/1e18:.5f} ETH")
 for f in (poller,prefetch): threading.Thread(target=f,daemon=True).start()
@@ -157,4 +177,5 @@ def reporter():
         time.sleep(60); L=LIVE[0]
         log(f"[状态] 收解 {stats['sol']}（错{stats['bad']} 旧{stats['stale']}）发交易 {stats['tx']} 成功 {stats['ok']} 失败 {stats['fail']}｜已挖 {L['supply']} 价格 {L['price']/1e18}｜余额 {(pre['bal'] or 0)/1e18:.5f}")
 threading.Thread(target=reporter,daemon=True).start()
+ThreadingHTTPServer.daemon_threads=True
 ThreadingHTTPServer(("0.0.0.0",PORT),Hd).serve_forever()
