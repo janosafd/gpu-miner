@@ -35,11 +35,9 @@ ERR={"0d1fb381":"AnchorExpired 锚点过期","e26384a8":"AnchorInFuture","173a29
      "c365ff15":"BlockFull 这个块已有人挖到","6f312cbd":"NotStarted","52df9fe5":"SoldOut 挖完了","949ce241":"Underpaid 付款不足"}
 
 def log(*a): print(time.strftime("%H:%M:%S"),*a,flush=True)
-rr=[0]
 def status():
     last=None
-    for _ in range(len(ws)):
-        rr[0]+=1; w=ws[rr[0]%len(ws)]
+    for w in ws:   # 按体检延迟从快到慢排好，只用最快的读题，它失败才换下一个
         try:
             v=decode([ST],w.eth.call({"to":C,"data":S_STATUS}))[0]
             return dict(ablk=v[0],anchor=bytes(v[1]),prev=bytes(v[2]),target=v[3],price=v[5],supply=v[6],maxs=v[7],
@@ -164,11 +162,13 @@ log(f"[提交机] 钱包 {M} {'【测试模式，不提交】' if DRY else ''} �
 good=[]
 for w,u in zip(ws,RPCS):
     try:
-        t=time.time(); w.eth.call({"to":C,"data":S_STATUS}); good.append(w)
-        log(f"[节点] ✅ {u[:40]} {(time.time()-t)*1000:.0f}ms")
+        best=9e9
+        for _ in range(3):
+            t=time.time(); w.eth.call({"to":C,"data":S_STATUS}); best=min(best,time.time()-t)
+        good.append((best,w)); log(f"[节点] ✅ {u[:40]} {best*1000:.0f}ms")
     except Exception as e: log(f"[节点] ❌ {u[:40]} 不能用，踢掉：{str(e)[:60]}")
 if not good: sys.exit("!! 所有节点都不能用，不开挖")
-ws=good
+ws=[w for _,w in sorted(good,key=lambda x:x[0])]   # 读题用最快的；广播交易仍然发给全部
 LIVE[0]=status(); L=LIVE[0]
 log(f"[链] 块{L['blk']} 已挖 {L['supply']}/{L['maxs']} 第{L['epoch']}期 价格 {L['price']/1e18} ETH 余额 {ws[0].eth.get_balance(M)/1e18:.5f} ETH")
 for f in (poller,prefetch): threading.Thread(target=f,daemon=True).start()
