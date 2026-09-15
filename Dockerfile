@@ -17,6 +17,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends python3
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /src/ptd /app/ptd
-COPY potmine.py /app/
+COPY potmine.py worker.py submitd.py /app/
 LABEL org.opencontainers.image.source=https://github.com/janosafd/gpu-miner
-CMD ["python3", "-u", "/app/potmine.py"]
+# 有 JOB_URL = 算力机模式（不带私钥，解交给提交机）；否则 = 单机模式（自己带私钥提交）
+CMD ["sh", "-c", "if [ -n \"$JOB_URL\" ]; then exec python3 -u /app/worker.py; else exec python3 -u /app/potmine.py; fi"]
